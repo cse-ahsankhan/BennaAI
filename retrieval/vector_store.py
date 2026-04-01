@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import numpy as np
 import chromadb
@@ -32,11 +32,21 @@ def _collection_name(project_id: str) -> str:
 def _get_or_create_collection(project_id: str):
     client = _get_client()
     name = _collection_name(project_id)
-    collection = client.get_or_create_collection(
+    return client.get_or_create_collection(
         name=name,
         metadata={"hnsw:space": "cosine"},
     )
-    return collection
+
+
+def _build_where(filters: Optional[Dict[str, str]]) -> Optional[Dict]:
+    """Convert a simple {key: value} filter dict into a ChromaDB where clause."""
+    if not filters:
+        return None
+    items = list(filters.items())
+    if len(items) == 1:
+        k, v = items[0]
+        return {k: {"$eq": v}}
+    return {"$and": [{k: {"$eq": v}} for k, v in items]}
 
 
 def add_documents(
@@ -44,9 +54,6 @@ def add_documents(
     embeddings: np.ndarray,
     project_id: str,
 ) -> None:
-    """
-    Persist chunks and their embeddings to the ChromaDB collection for project_id.
-    """
     if len(chunks) != len(embeddings):
         raise ValueError(
             f"chunks ({len(chunks)}) and embeddings ({len(embeddings)}) length mismatch"
@@ -62,17 +69,16 @@ def add_documents(
             "page_num": int(c["page_num"]),
             "language": c["language"],
             "doc_type": c["doc_type"],
-            "clause_ref": c.get("clause_ref", ""),
+            "clause_ref": c.get("clause_ref") or "",
+            "section_header": c.get("section_header") or "",
         }
         for c in chunks
     ]
-    embedding_list = embeddings.tolist()
 
-    # ChromaDB upsert to avoid duplicates on re-ingestion
     collection.upsert(
         ids=ids,
         documents=documents,
-        embeddings=embedding_list,
+        embeddings=embeddings.tolist(),
         metadatas=metadatas,
     )
     logger.info(
@@ -85,12 +91,12 @@ def add_documents(
 def similarity_search(
     query_embedding: np.ndarray,
     project_id: str,
-    top_k: int = 20,
+    top_k: int = 10,
+    filters: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Return top_k most similar chunks for query_embedding.
-
-    Each result: {chunk_id, text, metadata, distance}
+    Optional filters: {doc_type: "contract"} | {language: "ar"} etc.
     """
     collection = _get_or_create_collection(project_id)
     count = collection.count()
@@ -99,11 +105,17 @@ def similarity_search(
         return []
 
     actual_k = min(top_k, count)
-    results = collection.query(
+    where = _build_where(filters)
+
+    query_kwargs: Dict[str, Any] = dict(
         query_embeddings=[query_embedding.tolist()],
         n_results=actual_k,
         include=["documents", "metadatas", "distances"],
     )
+    if where:
+        query_kwargs["where"] = where
+
+    results = collection.query(**query_kwargs)
 
     hits = []
     for i, doc_id in enumerate(results["ids"][0]):
@@ -119,7 +131,6 @@ def similarity_search(
 
 
 def list_projects() -> List[str]:
-    """Return list of project IDs that have been indexed."""
     client = _get_client()
     collections = client.list_collections()
     prefix = "benna_"
@@ -127,6 +138,33 @@ def list_projects() -> List[str]:
 
 
 def document_count(project_id: str) -> int:
-    """Return the number of indexed chunks for project_id."""
     collection = _get_or_create_collection(project_id)
     return collection.count()
+
+
+def get_indexed_files(project_id: str) -> List[str]:
+    """Return sorted list of distinct source_file values in the project collection."""
+    try:
+        collection = _get_or_create_collection(project_id)
+        results = collection.get(include=["metadatas"])
+        files = {
+            m.get("source_file", "")
+            for m in results["metadatas"]
+            if m.get("source_file")
+        }
+        return sorted(files)
+    except Exception:
+        return []
+
+
+class VectorStore:
+    """Thin class wrapper around module-level functions for API compatibility."""
+
+    def get_indexed_files(self, project_id: str) -> List[str]:
+        return get_indexed_files(project_id)
+
+    def document_count(self, project_id: str) -> int:
+        return document_count(project_id)
+
+    def list_projects(self) -> List[str]:
+        return list_projects()

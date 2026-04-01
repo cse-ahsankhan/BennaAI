@@ -1,7 +1,7 @@
 import logging
 import re
 import uuid
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -9,82 +9,271 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Patterns for structure detection
-_CLAUSE_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)+)\s+\S", re.MULTILINE)
-_SECTION_HEADER_PATTERN = re.compile(r"^\s*([A-Z][A-Z\s]{3,})\s*$", re.MULTILINE)
-_RFI_PATTERN = re.compile(r"\bRFI[\s\-#]*\d+\b", re.IGNORECASE)
+# ---------------------------------------------------------------------------
+# Compiled patterns
+# ---------------------------------------------------------------------------
 
+# Numbered clause at line start: "1.", "1.1", "1.1.1", "12.4.3"
+_NUMBERED_CLAUSE = re.compile(
+    r"^\s*(\d{1,3}(?:\.\d{1,3}){0,4}\.?)\s+\S",
+    re.MULTILINE,
+)
+
+# FIDIC / NEC style: "Clause 4", "Sub-Clause 4.1", "Article 12"
+_FIDIC_CLAUSE = re.compile(
+    r"^\s*((?:Sub-?)?Clause\s+\d+(?:\.\d+)*|Article\s+\d+(?:\.\d+)*)",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+# RFI boundary markers
+_RFI_BOUNDARY = re.compile(
+    r"(?:RFI[-\s]?\d+|RFI\s+No\.?\s*\d+|Request\s+for\s+Information)",
+    re.IGNORECASE,
+)
+
+# Arabic section markers at line start
+_ARABIC_MARKER = re.compile(
+    r"^\s*(المادة|البند|الفقرة)\s",
+    re.MULTILINE,
+)
+
+
+def _is_allcaps_header(line: str) -> bool:
+    """True if line is 10-80 chars with >80% uppercase letters."""
+    line = line.strip()
+    if not 10 <= len(line) <= 80:
+        return False
+    letters = [c for c in line if c.isalpha()]
+    if not letters:
+        return False
+    return sum(1 for c in letters if c.isupper()) / len(letters) > 0.8
+
+
+# ---------------------------------------------------------------------------
+# Document type detection
+# ---------------------------------------------------------------------------
 
 def _detect_doc_type(text: str) -> str:
-    """Heuristic document type detection."""
     text_lower = text.lower()
-    rfi_hits = len(_RFI_PATTERN.findall(text))
-    if rfi_hits >= 2:
+
+    if len(_RFI_BOUNDARY.findall(text)) >= 2:
         return "rfi"
-    if any(kw in text_lower for kw in ("contract", "agreement", "parties", "whereas", "عقد")):
+
+    contract_kw = ("fidic", "nec", "agreement", "contractor", "employer",
+                   "liquidated damages", "العقد", "المقاول")
+    if any(kw in text_lower for kw in contract_kw):
         return "contract"
-    if any(kw in text_lower for kw in ("specification", "material", "standard", "مواصفة", "مواصفات")):
+
+    spec_kw = ("specification", "material", "astm", "bs ", "saso",
+                "compressive strength", "المواصفات", "مواصفة")
+    if any(kw in text_lower for kw in spec_kw):
         return "spec"
+
     return "general"
 
 
+# ---------------------------------------------------------------------------
+# Structure analysis
+# ---------------------------------------------------------------------------
+
+def _is_structured(text: str) -> bool:
+    """Return True if >5% of lines contain recognisable clause/section markers."""
+    lines = text.splitlines()
+    total = len(lines)
+    if total == 0:
+        return False
+    structured = sum(
+        1 for line in lines
+        if (_NUMBERED_CLAUSE.match(line)
+            or _FIDIC_CLAUSE.match(line)
+            or _RFI_BOUNDARY.search(line)
+            or _ARABIC_MARKER.match(line)
+            or _is_allcaps_header(line))
+    )
+    return (structured / total) > 0.05
+
+
+# ---------------------------------------------------------------------------
+# Metadata helpers
+# ---------------------------------------------------------------------------
+
 def _extract_clause_ref(text: str) -> str:
-    """Return the first clause reference found (e.g. '3.2.1'), or empty string."""
-    match = _CLAUSE_PATTERN.search(text)
-    return match.group(1) if match else ""
+    """Extract the first recognisable clause reference from text."""
+    m = _FIDIC_CLAUSE.search(text)
+    if m:
+        return m.group(1).strip()
+    m = _NUMBERED_CLAUSE.search(text)
+    if m:
+        return m.group(1).strip()
+    m = _ARABIC_MARKER.search(text)
+    if m:
+        line_end = text.find("\n", m.start())
+        return text[m.start(): line_end if line_end != -1 else m.start() + 60].strip()[:60]
+    return ""
 
 
-def _split_by_clauses(text: str) -> List[str]:
+def _extract_section_header(text: str) -> Optional[str]:
+    """Return the first ALL CAPS or Arabic section header found in text."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if _is_allcaps_header(stripped):
+            return stripped
+        if _ARABIC_MARKER.match(line):
+            return stripped[:60]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Boundary splitting
+# ---------------------------------------------------------------------------
+
+def _split_on_boundaries(text: str) -> List[tuple]:
     """
-    Split text at clause boundaries (e.g. '1.1 ', '2.3.4 ').
-    Returns a list of clause-level segments.
+    Split text at clause/section boundaries.
+    Returns list of (segment_text, clause_ref, section_header).
     """
-    positions = [m.start() for m in _CLAUSE_PATTERN.finditer(text)]
-    if not positions:
-        return [text]
+    boundaries = set()
 
+    for pattern in (_NUMBERED_CLAUSE, _FIDIC_CLAUSE, _ARABIC_MARKER):
+        for m in pattern.finditer(text):
+            line_start = text.rfind("\n", 0, m.start()) + 1
+            pre = text[line_start: m.start()]
+            if m.start() == line_start or not pre.strip():
+                boundaries.add(m.start())
+
+    for m in re.finditer(r"^[^\n]{10,80}$", text, re.MULTILINE):
+        if _is_allcaps_header(m.group()):
+            boundaries.add(m.start())
+
+    if not boundaries:
+        return [(text, _extract_clause_ref(text), _extract_section_header(text))]
+
+    sorted_bounds = sorted(boundaries)
     segments = []
-    for i, start in enumerate(positions):
-        end = positions[i + 1] if i + 1 < len(positions) else len(text)
-        segments.append(text[start:end].strip())
-    # Include any text before the first clause
-    if positions[0] > 0:
-        segments.insert(0, text[: positions[0]].strip())
-    return [s for s in segments if s]
+
+    if sorted_bounds[0] > 0:
+        pre = text[: sorted_bounds[0]].strip()
+        if pre:
+            segments.append((pre, _extract_clause_ref(pre), _extract_section_header(pre)))
+
+    for i, start in enumerate(sorted_bounds):
+        end = sorted_bounds[i + 1] if i + 1 < len(sorted_bounds) else len(text)
+        seg = text[start:end].strip()
+        if seg:
+            segments.append((seg, _extract_clause_ref(seg), _extract_section_header(seg)))
+
+    return segments
 
 
-def _split_rfi(pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Treat each RFI occurrence in the document as its own chunk."""
+def _merge_small_segments(segments: List[tuple], min_words: int = 50) -> List[tuple]:
+    """Merge segments under min_words into the following sibling."""
+    if not segments:
+        return segments
+    result = []
+    i = 0
+    while i < len(segments):
+        seg_text, clause, header = segments[i]
+        if len(seg_text.split()) < min_words and i + 1 < len(segments):
+            next_text, next_clause, next_header = segments[i + 1]
+            segments[i + 1] = (
+                seg_text + "\n" + next_text,
+                clause or next_clause,
+                header or next_header,
+            )
+            i += 1
+            continue
+        result.append((seg_text, clause, header))
+        i += 1
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Splitter singleton
+# ---------------------------------------------------------------------------
+
+_SPLITTER: Optional[RecursiveCharacterTextSplitter] = None
+
+
+def _get_splitter() -> RecursiveCharacterTextSplitter:
+    global _SPLITTER
+    if _SPLITTER is None:
+        _SPLITTER = RecursiveCharacterTextSplitter(
+            chunk_size=config.CHUNK_SIZE,
+            chunk_overlap=config.CHUNK_OVERLAP,
+            separators=["\n\n", "\n", ". ", " ", ""],
+        )
+    return _SPLITTER
+
+
+def _finalize_segment(
+    seg_text: str,
+    clause_ref: str,
+    section_header: Optional[str],
+    base_meta: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Split oversized segment further, emit chunk dicts."""
+    max_chars = config.CHUNK_SIZE * 6  # ~1.5x token limit in chars
+    sub_segs = _get_splitter().split_text(seg_text) if len(seg_text) > max_chars else [seg_text]
     chunks = []
-    full_text = "\n".join(p["text"] for p in pages)
-    # Split on RFI boundaries
-    rfi_splits = re.split(r"(?=\bRFI[\s\-#]*\d+\b)", full_text, flags=re.IGNORECASE)
-    first_page = pages[0] if pages else {}
-
-    for segment in rfi_splits:
-        segment = segment.strip()
-        if not segment:
+    for sub in sub_segs:
+        sub = sub.strip()
+        if len(sub) < 30:
             continue
         chunks.append(
             {
-                "text": segment,
+                "text": sub,
+                "chunk_id": str(uuid.uuid4()),
+                "clause_ref": clause_ref or _extract_clause_ref(sub),
+                "section_header": section_header,
+                **base_meta,
+            }
+        )
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# RFI splitting
+# ---------------------------------------------------------------------------
+
+def _split_rfi(pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    full_text = "\n".join(p["text"] for p in pages)
+    parts = re.split(
+        r"(?=(?:RFI[-\s]?\d+|RFI\s+No\.?\s*\d+|Request\s+for\s+Information))",
+        full_text,
+        flags=re.IGNORECASE,
+    )
+    first_page = pages[0] if pages else {}
+    chunks = []
+    for part in parts:
+        part = part.strip()
+        if len(part) < 30:
+            continue
+        chunks.append(
+            {
+                "text": part,
                 "source_file": first_page.get("source_file", ""),
                 "page_num": first_page.get("page_num", 1),
                 "chunk_id": str(uuid.uuid4()),
                 "language": first_page.get("language", "unknown"),
                 "doc_type": "rfi",
-                "clause_ref": _extract_clause_ref(segment),
+                "clause_ref": _extract_clause_ref(part),
+                "section_header": _extract_section_header(part),
             }
         )
     return chunks
 
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 
 def chunk_pages(pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Convert raw page dicts into structured chunk dicts.
 
     Each chunk:
-        {text, source_file, page_num, chunk_id, language, doc_type, clause_ref}
+        {text, source_file, page_num, chunk_id, language, doc_type,
+         clause_ref, section_header}
     """
     if not pages:
         return []
@@ -93,12 +282,14 @@ def chunk_pages(pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     doc_type = _detect_doc_type(full_text)
     logger.info("Detected document type: %s", doc_type)
 
-    chunks: List[Dict[str, Any]] = []
-
     if doc_type == "rfi":
-        return _split_rfi(pages)
+        chunks = _split_rfi(pages)
+        logger.info("Created %d RFI chunks from %d pages", len(chunks), len(pages))
+        return chunks
 
-    # Build a flat list of segments across all pages
+    chunks: List[Dict[str, Any]] = []
+    splitter = _get_splitter()
+
     for page in pages:
         text = page["text"]
         base_meta = {
@@ -108,43 +299,29 @@ def chunk_pages(pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "doc_type": doc_type,
         }
 
-        if doc_type in ("contract", "spec") and _CLAUSE_PATTERN.search(text):
-            segments = _split_by_clauses(text)
+        if _is_structured(text):
+            raw_segs = _split_on_boundaries(text)
+            raw_segs = _merge_small_segments(raw_segs, min_words=50)
+            for seg_text, clause_ref, section_header in raw_segs:
+                chunks.extend(_finalize_segment(seg_text, clause_ref, section_header, base_meta))
         else:
-            # Fallback: RecursiveCharacterTextSplitter
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=config.CHUNK_SIZE,
-                chunk_overlap=config.CHUNK_OVERLAP,
-                separators=["\n\n", "\n", ". ", " ", ""],
-            )
-            segments = splitter.split_text(text)
-
-        for segment in segments:
-            segment = segment.strip()
-            if len(segment) < 20:  # skip noise
-                continue
-            # If a segment is still too large, further split it
-            if len(segment) > config.CHUNK_SIZE * 2:
-                splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=config.CHUNK_SIZE,
-                    chunk_overlap=config.CHUNK_OVERLAP,
-                )
-                sub_segs = splitter.split_text(segment)
-            else:
-                sub_segs = [segment]
-
-            for sub in sub_segs:
-                sub = sub.strip()
-                if len(sub) < 20:
+            for seg in splitter.split_text(text):
+                seg = seg.strip()
+                if len(seg) < 30:
                     continue
                 chunks.append(
                     {
-                        "text": sub,
+                        "text": seg,
                         "chunk_id": str(uuid.uuid4()),
-                        "clause_ref": _extract_clause_ref(sub),
+                        "clause_ref": _extract_clause_ref(seg),
+                        "section_header": _extract_section_header(seg),
                         **base_meta,
                     }
                 )
 
     logger.info("Created %d chunks from %d pages", len(chunks), len(pages))
     return chunks
+
+
+# Alias for import compatibility
+chunk_documents = chunk_pages

@@ -17,7 +17,6 @@ SYSTEM_PROMPT = (
 
 
 def _format_context(context_chunks: List[Dict[str, Any]]) -> str:
-    """Format retrieved chunks into a numbered context block for the LLM."""
     parts = []
     for i, chunk in enumerate(context_chunks, 1):
         meta = chunk.get("metadata", {})
@@ -54,17 +53,15 @@ class _ClaudeProvider:
     def generate(self, query: str, context_chunks: List[Dict[str, Any]]) -> str:
         context = _format_context(context_chunks)
         user_content = _build_prompt(query, context)
-
         full_response = []
         with self._client.messages.stream(
             model=self._model,
-            max_tokens=2048,
+            max_tokens=1024,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         ) as stream:
             for text in stream.text_stream:
                 full_response.append(text)
-
         return "".join(full_response)
 
     def generate_stream(
@@ -72,10 +69,9 @@ class _ClaudeProvider:
     ) -> Generator[str, None, None]:
         context = _format_context(context_chunks)
         user_content = _build_prompt(query, context)
-
         with self._client.messages.stream(
             model=self._model,
-            max_tokens=2048,
+            max_tokens=1024,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         ) as stream:
@@ -95,6 +91,8 @@ class _OllamaProvider:
             self._llm = Ollama(
                 base_url=config.OLLAMA_BASE_URL,
                 model=config.OLLAMA_MODEL,
+                num_ctx=4096,
+                num_predict=512,
             )
         except ImportError:
             raise ImportError("langchain-community is required for Ollama support")
@@ -142,12 +140,7 @@ _provider_cache: Dict[str, Any] = {}
 
 
 def get_llm(provider: str | None = None):
-    """
-    Return the LLM provider instance based on LLM_PROVIDER config (or override).
-    Instances are cached per provider name.
-    """
     name = (provider or config.LLM_PROVIDER).lower()
-
     if name not in _provider_cache:
         if name == "claude":
             logger.info("Initialising Claude provider (model: claude-sonnet-4-6)")
@@ -161,10 +154,8 @@ def get_llm(provider: str | None = None):
             _provider_cache[name] = _OllamaProvider()
         else:
             raise ValueError(f"Unknown LLM provider: '{name}'. Choose 'ollama' or 'claude'.")
-
     return _provider_cache[name]
 
 
 def clear_cache() -> None:
-    """Clear provider cache (useful when switching providers at runtime)."""
     _provider_cache.clear()
