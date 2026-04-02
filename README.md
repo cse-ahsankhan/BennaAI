@@ -1,4 +1,4 @@
-# Benna AI 🏗️
+# Benna AI
 ### Construction Document Intelligence for the GCC
 
 Benna AI lets construction professionals query project documents — contracts, technical specs, and RFIs — using natural language in **Arabic and English**. Upload a PDF, ask a question, get an answer with the exact source clause cited.
@@ -32,7 +32,7 @@ Built with hybrid retrieval (semantic search + BM25) fused via Reciprocal Rank F
 **Conflict Detection tab — compare documents:**
 > *Topic: "concrete grade requirements"* · Doc A: contract · Doc B: spec
 >
-> ⚠️ **CONTRADICTION DETECTED**
+> **CONTRADICTION DETECTED**
 > *Document A specifies C30 concrete for structural columns (Clause 5.2.1). Document B requires C35 as minimum grade for all structural elements (Section 4.3). The contract is under-specified relative to the technical specification…*
 
 Arabic queries supported:
@@ -147,7 +147,7 @@ ollama pull qwen2.5:7b
 5. Expand **Sources** to see document, page, clause, and retrieval confidence
 
 ### Conflict Detection
-1. Switch to the **⚡ Conflict Detection** tab
+1. Switch to the **Conflict Detection** tab
 2. Select **Document A** and **Document B** — by type (`contract`, `spec`, `rfi`) or by specific file
 3. Enter the **topic** to compare (e.g. *"payment terms"*, *"defects liability period"*)
 4. Click **Detect Conflicts**
