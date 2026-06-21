@@ -323,5 +323,9 @@ def chunk_pages(pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return chunks
 
 
-# Alias for import compatibility
-chunk_documents = chunk_pages
+def chunk_documents(
+    pages: List[Dict[str, Any]],
+    source_file: str = "",  # accepted but ignored — source_file is already in each page dict
+) -> List[Dict[str, Any]]:
+    """Alias for chunk_pages with an optional source_file arg for call-site compatibility."""
+    return chunk_pages(pages)

@@ -11,6 +11,10 @@ env/
 data/uploads/
 data/chroma_db/
 data/bm25_indexes/
+data/embed_cache/
+*.log
+.claude/
+
 
 # Python
 __pycache__/
@@ -38,3 +42,7 @@ desktop.ini
 
 # Model cache (sentence-transformers downloads here)
 .cache/
+
+# Automation scripts
+push.sh
+

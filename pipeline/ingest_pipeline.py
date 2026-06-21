@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Optional
 
-from ingest.loader import load_pdf
+from ingest.loader import load_document
 from ingest.chunker import chunk_pages
 from ingest.embedder import embed_passages
 from retrieval import vector_store, bm25_index
@@ -16,14 +16,17 @@ def ingest_document(
     file_path: Path,
     project_id: str,
     progress_callback: Callable[[str], None] | None = None,
+    display_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Full ingest pipeline: PDF → pages → chunks → embeddings → ChromaDB + BM25.
+    Full ingest pipeline: document → pages → chunks → embeddings → ChromaDB + BM25.
 
     Args:
-        file_path:          Path to the PDF file.
+        file_path:          Path to the document file (PDF or Excel).
         project_id:         Namespace for this project's indexes.
         progress_callback:  Optional callable(message) for progress reporting.
+        display_name:       Human-readable label stored as source_file in all chunks.
+                            Defaults to the actual filename if not provided.
 
     Returns:
         Summary dict: {file, pages_processed, chunks_created, languages_detected}
@@ -34,17 +37,24 @@ def ingest_document(
             progress_callback(msg)
 
     file_path = Path(file_path)
-    report(f"[1/4] Loading PDF: {file_path.name}")
-    pages = load_pdf(file_path)
+    label = display_name.strip() if display_name and display_name.strip() else file_path.name
+
+    report(f"[1/4] Loading document: {file_path.name}")
+    pages = load_document(file_path)
 
     if not pages:
         logger.warning("No text extracted from '%s'", file_path.name)
         return {
-            "file": file_path.name,
+            "file": label,
             "pages_processed": 0,
             "chunks_created": 0,
             "languages_detected": [],
         }
+
+    # Override source_file with the user-supplied display name
+    if label != file_path.name:
+        for page in pages:
+            page["source_file"] = label
 
     languages_detected = list({p["language"] for p in pages})
 
@@ -54,7 +64,7 @@ def ingest_document(
     if not chunks:
         logger.warning("No chunks produced from '%s'", file_path.name)
         return {
-            "file": file_path.name,
+            "file": label,
             "pages_processed": len(pages),
             "chunks_created": 0,
             "languages_detected": languages_detected,
@@ -69,7 +79,7 @@ def ingest_document(
     bm25_index.append_and_rebuild(chunks, project_id)
 
     summary = {
-        "file": file_path.name,
+        "file": label,
         "pages_processed": len(pages),
         "chunks_created": len(chunks),
         "languages_detected": languages_detected,

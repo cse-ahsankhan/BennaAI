@@ -151,33 +151,27 @@ if "filter_language" not in st.session_state:
 # Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.title("🏗️ Benna AI")
-    st.caption("Construction Document Intelligence · GCC")
+    # 1-2. Header
+    st.title("Benna AI")
+    st.caption("Construction document intelligence")
     st.divider()
 
-    # --- LLM provider ---
-    st.subheader("LLM Provider")
-    provider_choice = st.radio(
-        "Select LLM",
-        options=["ollama", "claude"],
-        index=0 if st.session_state.llm_provider == "ollama" else 1,
-        horizontal=True,
-        key="provider_radio",
-    )
-    if provider_choice != st.session_state.llm_provider:
-        st.session_state.llm_provider = provider_choice
-        clear_cache()
-        st.success(f"Switched to {provider_choice}")
-
-    if provider_choice == "claude" and not config.ANTHROPIC_API_KEY:
-        st.error("ANTHROPIC_API_KEY is not set in your .env file.")
-
-    st.divider()
-
-    # --- Project selector ---
+    # 3-4. Project selector
     st.subheader("Project")
     existing_projects = vector_store.list_projects()
 
+    if existing_projects:
+        selected = st.selectbox(
+            "Select project",
+            options=["— select —"] + existing_projects,
+        )
+        if selected != "— select —" and selected != st.session_state.project_id:
+            st.session_state.project_id = selected
+            st.session_state.messages = []
+    else:
+        st.info("No projects yet — create one below.")
+
+    # 5. New project input
     new_project_name = st.text_input(
         "New project name",
         placeholder="e.g. tower-b-phase2",
@@ -190,70 +184,9 @@ with st.sidebar:
         st.success(f"Project '{sanitized}' created.")
         existing_projects = vector_store.list_projects()
 
-    if existing_projects:
-        selected = st.selectbox(
-            "Or select existing project",
-            options=["— select —"] + existing_projects,
-        )
-        if selected != "— select —" and selected != st.session_state.project_id:
-            st.session_state.project_id = selected
-            st.session_state.messages = []
-    else:
-        st.info("No projects yet — create one above.")
-
     st.divider()
 
-    # --- Document upload ---
-    st.subheader("Upload Document")
-    if not st.session_state.project_id:
-        st.warning("Select or create a project first.")
-    else:
-        uploaded_file = st.file_uploader(
-            "Upload PDF",
-            type=["pdf"],
-            help="Contracts, technical specs, RFIs — Arabic or English",
-        )
-        if uploaded_file is not None:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded_file.getbuffer())
-                tmp_path = Path(tmp.name)
-
-            progress_placeholder = st.empty()
-            messages_log: List[str] = []
-
-            def _progress(msg: str) -> None:
-                messages_log.append(msg)
-                progress_placeholder.info("\n\n".join(messages_log[-3:]))
-
-            with st.spinner("Ingesting document …"):
-                try:
-                    if not st.session_state.embedding_warned:
-                        st.toast(
-                            "First run: downloading embedding model (~1.1 GB). "
-                            "This may take a few minutes.",
-                            icon="⚠️",
-                        )
-                        st.session_state.embedding_warned = True
-                    summary = ingest_document(
-                        tmp_path,
-                        st.session_state.project_id,
-                        progress_callback=_progress,
-                    )
-                    progress_placeholder.success(
-                        f"Ingested **{summary['file']}** — "
-                        f"{summary['chunks_created']} chunks from "
-                        f"{summary['pages_processed']} pages "
-                        f"(languages: {', '.join(summary['languages_detected'])})"
-                    )
-                except Exception as exc:
-                    progress_placeholder.error(f"Ingestion failed: {exc}")
-                    logger.exception("Ingestion error")
-                finally:
-                    tmp_path.unlink(missing_ok=True)
-
-    st.divider()
-
-    # --- Retrieval filters ---
+    # 8-9. Retrieval filters
     st.subheader("Filters")
     st.multiselect(
         "Document type",
@@ -274,30 +207,55 @@ with st.sidebar:
 
     st.divider()
 
-    # --- Stats ---
+    # LLM provider toggle + stats (bottom)
+    provider_choice = st.radio(
+        "LLM provider",
+        options=["ollama", "claude"],
+        index=0 if st.session_state.llm_provider == "ollama" else 1,
+        horizontal=True,
+        key="provider_radio",
+    )
+    if provider_choice != st.session_state.llm_provider:
+        st.session_state.llm_provider = provider_choice
+        clear_cache()
+        st.success(f"Switched to {provider_choice}")
+
+    if provider_choice == "claude" and not config.ANTHROPIC_API_KEY:
+        st.error("ANTHROPIC_API_KEY is not set in your .env file.")
+
     if st.session_state.project_id:
         count = vector_store.document_count(st.session_state.project_id)
         st.metric("Indexed chunks", count)
 
-    st.caption(f"Project: **{st.session_state.project_id or 'none'}**")
-    st.caption(f"LLM: **{st.session_state.llm_provider}**")
-
 
 # ---------------------------------------------------------------------------
-# Main chat area
+# Main area header
 # ---------------------------------------------------------------------------
-st.title("🏗️ Benna AI")
-st.caption(
-    f"Construction Document Intelligence · GCC · "
-    f"Provider: **{st.session_state.llm_provider}**"
-    + (f" · Project: **{st.session_state.project_id}**" if st.session_state.project_id else "")
-)
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.markdown("## Benna AI")
+    st.caption("Construction document intelligence for GCC projects")
+with col2:
+    if st.session_state.get("project_id"):
+        st.markdown(
+            f"<div style='text-align:right;padding-top:8px'>"
+            f"Project: "
+            f"<strong>"
+            f"{st.session_state.project_id}</strong></div>",
+            unsafe_allow_html=True,
+        )
+st.divider()
+
+tab1, tab2, tab3 = st.tabs(["💬 Chat", "📁 Documents", "⚡ Conflict Detection"])
 
 if not st.session_state.project_id:
-    st.info("👈 Create or select a project in the sidebar, then upload a document to get started.")
+    with tab1:
+        st.info("👈 Create or select a project in the sidebar to get started.")
+    with tab2:
+        st.info("👈 Create or select a project in the sidebar to get started.")
+    with tab3:
+        st.info("👈 Create or select a project in the sidebar to get started.")
     st.stop()
-
-tab1, tab2 = st.tabs(["💬 Chat", "⚡ Conflict Detection"])
 
 # ===========================================================================
 # TAB 1 — Chat (unchanged)
@@ -355,12 +313,13 @@ with tab1:
             error_occurred = False
 
             try:
-                token_gen, sources, rewritten_query = query_stream(
-                    query_text=query_text,
-                    project_id=st.session_state.project_id,
-                    llm_provider=st.session_state.llm_provider,
-                    filters=active_filters,
-                )
+                with st.spinner("Analysing documents..."):
+                    token_gen, sources, rewritten_query = query_stream(
+                        query_text=query_text,
+                        project_id=st.session_state.project_id,
+                        llm_provider=st.session_state.llm_provider,
+                        filters=active_filters,
+                    )
 
                 if rewritten_query and rewritten_query != query_text:
                     rewritten_placeholder.markdown(
@@ -400,9 +359,90 @@ with tab1:
         )
 
 # ===========================================================================
-# TAB 2 — Conflict Detection
+# TAB 2 — Documents (upload + index overview)
 # ===========================================================================
 with tab2:
+    st.subheader("Project Documents")
+    st.caption("Upload and name your documents. The name you give here is used everywhere in Benna AI.")
+
+    indexed_files = vector_store.get_indexed_files(st.session_state.project_id)
+
+    # --- Indexed documents list ---
+    if indexed_files:
+        st.markdown("**Indexed documents**")
+        for fname in indexed_files:
+            st.markdown(f"- {fname}")
+    else:
+        st.info("No documents indexed yet — upload one below.")
+
+    st.divider()
+
+    # --- Upload form ---
+    st.markdown("**Upload a new document**")
+
+    with st.form("upload_form", clear_on_submit=True):
+        doc_label = st.text_input(
+            "Document name",
+            placeholder="e.g. Main Contract, Structural Spec, RFI-001",
+            help="This label identifies the document across Chat and Conflict Detection.",
+        )
+        uploaded_file = st.file_uploader(
+            "Choose file",
+            type=["pdf", "xlsx", "xls", "xlsm", "xltx", "xltm", "xlt"],
+            help="PDF or Excel — Arabic or English",
+        )
+        submit = st.form_submit_button("Upload & Index", type="primary")
+
+    if submit:
+        if not uploaded_file:
+            st.warning("Please select a file to upload.")
+        elif not doc_label.strip():
+            st.warning("Please enter a document name.")
+        else:
+            suffix = Path(uploaded_file.name).suffix or ".pdf"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(uploaded_file.getbuffer())
+                tmp_path = Path(tmp.name)
+
+            progress_placeholder = st.empty()
+            messages_log: List[str] = []
+
+            def _progress(msg: str) -> None:
+                messages_log.append(msg)
+                progress_placeholder.info("\n\n".join(messages_log[-3:]))
+
+            with st.spinner("Ingesting document …"):
+                try:
+                    if not st.session_state.embedding_warned:
+                        st.toast(
+                            "First run: downloading embedding model (~1.1 GB). "
+                            "This may take a few minutes.",
+                            icon="⚠️",
+                        )
+                        st.session_state.embedding_warned = True
+                    summary = ingest_document(
+                        tmp_path,
+                        st.session_state.project_id,
+                        progress_callback=_progress,
+                        display_name=doc_label.strip(),
+                    )
+                    progress_placeholder.success(
+                        f"Indexed **{summary['file']}** — "
+                        f"{summary['chunks_created']} chunks from "
+                        f"{summary['pages_processed']} pages "
+                        f"(languages: {', '.join(summary['languages_detected'])})"
+                    )
+                    st.toast("Document indexed successfully", icon="✅")
+                except Exception as exc:
+                    progress_placeholder.error(f"Ingestion failed: {exc}")
+                    logger.exception("Ingestion error")
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+
+# ===========================================================================
+# TAB 3 — Conflict Detection
+# ===========================================================================
+with tab3:
     st.subheader("Compare two documents for contradictions")
     st.caption(
         "Retrieve relevant clauses independently from two document sets, "
@@ -411,31 +451,28 @@ with tab2:
 
     indexed_files = vector_store.get_indexed_files(st.session_state.project_id)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.caption("**Document A**")
-        doc_a_type = st.selectbox(
-            "Filter by type",
-            ["contract", "spec", "rfi", "general"],
-            key="doc_a_type",
+    if len(indexed_files) < 2:
+        st.info(
+            "Upload at least **two documents** in the Documents tab to use conflict detection. "
+            f"Currently indexed: {len(indexed_files)} file(s)."
         )
-        doc_a_file = st.selectbox(
-            "Or specific file (overrides type)",
-            ["Any"] + indexed_files,
-            key="doc_a_file",
-        )
-    with col2:
-        st.caption("**Document B**")
-        doc_b_type = st.selectbox(
-            "Filter by type",
-            ["spec", "contract", "rfi", "general"],
-            key="doc_b_type",
-        )
-        doc_b_file = st.selectbox(
-            "Or specific file (overrides type)",
-            ["Any"] + indexed_files,
-            key="doc_b_file",
-        )
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption("**Document A**")
+            doc_a_file = st.selectbox(
+                "Select file",
+                indexed_files,
+                key="doc_a_file",
+            )
+        with col2:
+            st.caption("**Document B**")
+            remaining_b = [f for f in indexed_files if f != doc_a_file]
+            doc_b_file = st.selectbox(
+                "Select file",
+                remaining_b,
+                key="doc_b_file",
+            )
 
     conflict_query = st.text_area(
         "What topic should Benna compare?",
@@ -446,21 +483,17 @@ with tab2:
         height=80,
     )
 
-    run_button = st.button("Detect Conflicts", type="primary")
+    run_button = st.button(
+        "Detect Conflicts",
+        type="primary",
+        disabled=len(indexed_files) < 2,
+    )
 
     if run_button and conflict_query.strip():
-        doc_a_filter = (
-            {"source_file": doc_a_file}
-            if doc_a_file != "Any"
-            else {"doc_type": doc_a_type}
-        )
-        doc_b_filter = (
-            {"source_file": doc_b_file}
-            if doc_b_file != "Any"
-            else {"doc_type": doc_b_type}
-        )
+        doc_a_filter = {"source_file": doc_a_file}
+        doc_b_filter = {"source_file": doc_b_file}
 
-        with st.spinner("Comparing documents …"):
+        with st.spinner("Comparing documents for contradictions..."):
             try:
                 result = detect_conflicts(
                     query=conflict_query,
