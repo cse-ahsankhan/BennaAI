@@ -19,6 +19,7 @@ from retrieval import vector_store  # noqa: E402
 from pipeline.ingest_pipeline import ingest_document  # noqa: E402
 from pipeline.query_pipeline import query_stream  # noqa: E402
 from pipeline.conflict_pipeline import detect_conflicts  # noqa: E402
+from pipeline.risk_pipeline import scan_contract_for_risks, RiskFlag  # noqa: E402
 from llm.provider import clear_cache  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
@@ -55,6 +56,72 @@ st.markdown(
     .badge-clause   { background:#EDE9FE; color:#5B21B6; }
     .section-header { font-style: italic; color: #6B7280; font-size: 0.88em; }
     .rewritten-query { font-style: italic; color: #9CA3AF; font-size: 0.84em; }
+    .claims-card {
+        background-color: #F8FAFC;
+        border: 1px solid #E2E8F0;
+        border-radius: 8px;
+        padding: 12px;
+        margin: 6px 0;
+    }
+    .claims-header {
+        font-size: 1.0em;
+        font-weight: 700;
+        color: #1E293B;
+        margin-bottom: 6px;
+    }
+    .claims-grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 8px;
+    }
+    .claims-item {
+        font-size: 0.88em;
+        color: #475569;
+    }
+    .claims-label {
+        font-weight: 600;
+        color: #64748B;
+    }
+    .risk-card-high {
+        background: linear-gradient(135deg, #FEF2F2, #FFF5F5);
+        border-left: 4px solid #DC2626;
+        border-radius: 8px;
+        padding: 14px 16px;
+        margin: 8px 0;
+    }
+    .risk-card-medium {
+        background: linear-gradient(135deg, #FFFBEB, #FFFDF5);
+        border-left: 4px solid #D97706;
+        border-radius: 8px;
+        padding: 14px 16px;
+        margin: 8px 0;
+    }
+    .risk-card-low {
+        background: linear-gradient(135deg, #F0FDF4, #F7FFF9);
+        border-left: 4px solid #16A34A;
+        border-radius: 8px;
+        padding: 14px 16px;
+        margin: 8px 0;
+    }
+    .risk-card-ok {
+        background: #F8FAFC;
+        border-left: 4px solid #94A3B8;
+        border-radius: 8px;
+        padding: 14px 16px;
+        margin: 8px 0;
+    }
+    .risk-topic { font-weight: 700; font-size: 1.0em; margin-bottom: 4px; }
+    .risk-badge {
+        display: inline-block; border-radius: 4px; padding: 2px 8px;
+        font-size: 0.78em; font-weight: 700; margin-left: 8px;
+    }
+    .badge-high   { background:#FEE2E2; color:#B91C1C; }
+    .badge-medium { background:#FEF3C7; color:#92400E; }
+    .badge-low    { background:#D1FAE5; color:#065F46; }
+    .badge-ok     { background:#F1F5F9; color:#475569; }
+    .risk-finding { font-size:0.9em; color:#374151; margin: 4px 0; }
+    .risk-rec { font-size:0.85em; color:#6B7280; margin-top: 6px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -129,6 +196,53 @@ def _render_sources(sources: List[Dict]) -> None:
         st.progress(confidence, text=f"Relevance: {rrf_score:.4f}")
         if i < len(sources):
             st.divider()
+
+
+def _render_claims_data(claims_data: Optional[Dict]) -> None:
+    """Render verified external weather and holiday data in a premium layout."""
+    if not claims_data:
+        return
+
+    st.markdown(
+        f"""
+        <div class="claims-card">
+            <div class="claims-header">
+                🏗️ Verified External Claims Data for {claims_data['date']}
+            </div>
+            <div class="claims-grid">
+                <div class="claims-item">
+                    <span class="claims-label">Location:</span> {claims_data['city']} ({claims_data['country_code']})
+                </div>
+                <div class="claims-item">
+                    <span class="claims-label">Day of Week:</span> {claims_data['weekday']} {'(Weekend)' if claims_data['is_weekend'] else ''}
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**🌤️ Weather Data**")
+        weather = claims_data.get("weather")
+        if weather:
+            st.metric("Max Temperature", f"{weather['max_temp']} {weather['max_temp_unit']}")
+            st.metric("Precipitation", f"{weather['precipitation']} {weather['precipitation_unit']}")
+            st.metric("Max Wind Speed", f"{weather['max_wind']} {weather['max_wind_unit']}")
+        else:
+            st.info("Weather data not available for this date.")
+    with col2:
+        st.markdown("**📅 Calendar & Holidays**")
+        holiday = claims_data.get("holiday")
+        if holiday:
+            st.warning(f"🚨 Public Holiday: {holiday['name']}")
+            st.caption(f"Local name: {holiday['local_name']}")
+        else:
+            st.success("✅ Standard Working Day (No Public Holiday)")
+        
+        if claims_data.get('is_weekend'):
+            st.info("ℹ️ Day falls on a weekend.")
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +324,8 @@ with st.sidebar:
     # LLM provider toggle + stats (bottom)
     provider_choice = st.radio(
         "LLM provider",
-        options=["ollama", "claude"],
-        index=0 if st.session_state.llm_provider == "ollama" else 1,
+        options=["ollama", "claude", "mock"],
+        index=["ollama", "claude", "mock"].index(st.session_state.llm_provider) if st.session_state.llm_provider in ["ollama", "claude", "mock"] else 0,
         horizontal=True,
         key="provider_radio",
     )
@@ -246,7 +360,7 @@ with col2:
         )
 st.divider()
 
-tab1, tab2, tab3 = st.tabs(["💬 Chat", "📁 Documents", "⚡ Conflict Detection"])
+tab1, tab2, tab3, tab4 = st.tabs(["💬 Chat", "📁 Documents", "⚡ Conflict Detection", "🛡️ Risk Scan"])
 
 if not st.session_state.project_id:
     with tab1:
@@ -254,6 +368,8 @@ if not st.session_state.project_id:
     with tab2:
         st.info("👈 Create or select a project in the sidebar to get started.")
     with tab3:
+        st.info("👈 Create or select a project in the sidebar to get started.")
+    with tab4:
         st.info("👈 Create or select a project in the sidebar to get started.")
     st.stop()
 
@@ -283,6 +399,9 @@ with tab1:
                         unsafe_allow_html=True,
                     )
                 st.markdown(msg["content"])
+                if msg.get("claims_data"):
+                    with st.expander("📊 Verified Claims Data", expanded=True):
+                        _render_claims_data(msg["claims_data"])
                 if msg.get("sources"):
                     with st.expander("📎 Sources", expanded=False):
                         _render_sources(msg["sources"])
@@ -314,7 +433,7 @@ with tab1:
 
             try:
                 with st.spinner("Analysing documents..."):
-                    token_gen, sources, rewritten_query = query_stream(
+                    token_gen, sources, rewritten_query, claims_data = query_stream(
                         query_text=query_text,
                         project_id=st.session_state.project_id,
                         llm_provider=st.session_state.llm_provider,
@@ -344,6 +463,10 @@ with tab1:
                 logger.exception("Query pipeline error")
                 error_occurred = True
 
+            if claims_data and not error_occurred:
+                with st.expander("📊 Verified Claims Data", expanded=True):
+                    _render_claims_data(claims_data)
+
             if sources and not error_occurred:
                 with st.expander("📎 Sources", expanded=False):
                     _render_sources(sources)
@@ -355,6 +478,7 @@ with tab1:
                 "sources": sources,
                 "original_query": query_text,
                 "rewritten_query": rewritten_query,
+                "claims_data": claims_data,
             }
         )
 
@@ -570,3 +694,118 @@ with tab3:
 
     elif run_button and not conflict_query.strip():
         st.warning("Please enter a topic to compare.")
+
+# ===========================================================================
+# TAB 4 — Risk Scan
+# ===========================================================================
+with tab4:
+    st.subheader("🛡️ Automated Contract Risk Scanner")
+    st.caption(
+        "Scan any indexed contract document against a curated GCC/FIDIC risk knowledge base. "
+        "Identifies missing clauses, unfair provisions, and high-risk language — "
+        "aligned to standard construction contract norms."
+    )
+
+    indexed_files_risk = vector_store.get_indexed_files(st.session_state.project_id)
+
+    if not indexed_files_risk:
+        st.info("Upload at least one document in the **Documents** tab to use the Risk Scanner.")
+    else:
+        risk_doc = st.selectbox(
+            "Select contract to scan",
+            indexed_files_risk,
+            key="risk_doc_select",
+        )
+
+        col_info, col_btn = st.columns([3, 1])
+        with col_info:
+            st.caption(
+                f"Scanning **{risk_doc}** across **12 risk topics**: "
+                "Liquidated Damages, Force Majeure, Dispute Resolution, Defects Liability, "
+                "Payment Terms, Termination, Extension of Time, Variations, Liability Cap, "
+                "Governing Law, Performance Security, Insurance."
+            )
+        with col_btn:
+            scan_button = st.button("▶ Run Risk Scan", type="primary", use_container_width=True)
+
+    if 'risk_results' not in st.session_state:
+        st.session_state.risk_results = {}
+
+    if indexed_files_risk and scan_button:
+        with st.spinner(f"Scanning '{risk_doc}' across 12 risk topics — this may take 1–2 minutes..."):
+            try:
+                flags = scan_contract_for_risks(
+                    project_id=st.session_state.project_id,
+                    source_file=risk_doc,
+                    provider=st.session_state.llm_provider,
+                )
+                st.session_state.risk_results[risk_doc] = flags
+            except Exception as exc:
+                st.error(f"⚠️ Risk scan failed: {exc}")
+                logger.exception("Risk scan error")
+                flags = []
+
+    # Render existing results
+    if indexed_files_risk and st.session_state.risk_results.get(
+        st.session_state.get('risk_doc_select', '')
+    ):
+        flags = st.session_state.risk_results[st.session_state.risk_doc_select]
+
+        # Summary metrics
+        high_count   = sum(1 for f in flags if f.severity == "HIGH")
+        medium_count = sum(1 for f in flags if f.severity == "MEDIUM")
+        low_count    = sum(1 for f in flags if f.severity in ("LOW", "OK"))
+        missing_count= sum(1 for f in flags if f.is_missing)
+
+        st.divider()
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("🔴 High Risk",   high_count)
+        m2.metric("🟡 Medium Risk", medium_count)
+        m3.metric("🟢 Low / OK",   low_count)
+        m4.metric("⚠️ Missing Clauses", missing_count)
+        st.divider()
+
+        _SEVERITY_CARD = {
+            "HIGH":    ("risk-card-high",   "badge-high",   "🔴 HIGH"),
+            "MEDIUM":  ("risk-card-medium", "badge-medium", "🟡 MEDIUM"),
+            "LOW":     ("risk-card-low",    "badge-low",    "🟢 LOW"),
+            "OK":      ("risk-card-ok",     "badge-ok",     "✅ OK"),
+            "NOT_FOUND":("risk-card-medium","badge-medium", "⚠️ NOT FOUND"),
+            "UNCLEAR": ("risk-card-medium", "badge-medium", "❓ UNCLEAR"),
+        }
+
+        for flag in flags:
+            card_cls, badge_cls, badge_label = _SEVERITY_CARD.get(
+                flag.severity, ("risk-card-ok", "badge-ok", flag.severity)
+            )
+
+            st.markdown(
+                f"""
+                <div class="{card_cls}">
+                    <div class="risk-topic">
+                        {flag.topic}
+                        <span class="risk-badge {badge_cls}">{badge_label}</span>
+                        {'<span class="risk-badge" style="background:#FEE2E2;color:#9B1C1C">MISSING CLAUSE</span>' if flag.is_missing else ''}
+                    </div>
+                    <div class="risk-finding">🔍 {flag.finding}</div>
+                    <div class="risk-rec">💡 {flag.recommendation}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # Expandable source chunks (only if not missing)
+            if not flag.is_missing and flag.source_chunks:
+                with st.expander(f"📎 View source clauses for '{flag.topic}'", expanded=False):
+                    for i, chunk in enumerate(flag.source_chunks, 1):
+                        meta = chunk.get("metadata", {})
+                        clause_ref = meta.get("clause_ref", "")
+                        page = meta.get("page_num", "?")
+                        label = f"[{i}] Page {page}"
+                        if clause_ref:
+                            label += f" · Clause {clause_ref}"
+                        st.caption(label)
+                        st.code(chunk["text"][:400], language=None)
+                        if i < len(flag.source_chunks):
+                            st.divider()
+

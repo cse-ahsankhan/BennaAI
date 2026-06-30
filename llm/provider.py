@@ -133,6 +133,38 @@ class _OllamaProvider:
 
 
 # ---------------------------------------------------------------------------
+# Mock provider (for testing and offline demo)
+# ---------------------------------------------------------------------------
+
+class _MockProvider:
+    def generate(self, query: str, context_chunks: List[Dict[str, Any]]) -> str:
+        summary_lines = []
+        for c in context_chunks:
+            meta = c.get("metadata", {})
+            source = meta.get("source_file", "unknown")
+            ref = meta.get("clause_ref") or meta.get("section_header") or "clause"
+            summary_lines.append(f"• According to {source} ({ref}): \"{c['text'][:120]}...\"")
+        
+        context_summary = "\n".join(summary_lines)
+        return (
+            f"[Mock LLM Response]\n"
+            f"Regarding your query: '{query}', the document context indicates:\n"
+            f"{context_summary}\n\n"
+            f"This is a simulated response for testing and validation."
+        )
+
+    def generate_stream(
+        self, query: str, context_chunks: List[Dict[str, Any]]
+    ) -> Generator[str, None, None]:
+        full_text = self.generate(query, context_chunks)
+        # Yield word by word to simulate streaming
+        import time
+        for word in full_text.split(" "):
+            yield word + " "
+            time.sleep(0.02)
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -152,8 +184,11 @@ def get_llm(provider: str | None = None):
                 config.OLLAMA_BASE_URL,
             )
             _provider_cache[name] = _OllamaProvider()
+        elif name == "mock":
+            logger.info("Initialising Mock provider for local testing")
+            _provider_cache[name] = _MockProvider()
         else:
-            raise ValueError(f"Unknown LLM provider: '{name}'. Choose 'ollama' or 'claude'.")
+            raise ValueError(f"Unknown LLM provider: '{name}'. Choose 'ollama', 'claude', or 'mock'.")
     return _provider_cache[name]
 
 

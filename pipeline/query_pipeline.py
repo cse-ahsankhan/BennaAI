@@ -7,6 +7,7 @@ import config
 from ingest.embedder import embed_query
 from retrieval.hybrid import hybrid_search
 from llm.provider import get_llm
+from pipeline.claims_helper import analyze_query_for_claim, format_claims_context
 
 logger = logging.getLogger(__name__)
 
@@ -91,14 +92,18 @@ def query(
     Full query pipeline: (rewrite →) embed → hybrid retrieve → LLM answer.
 
     Returns:
-        {answer, sources, original_query, rewritten_query}
+        {answer, sources, original_query, rewritten_query, claims_data}
     """
     provider = (llm_provider or config.LLM_PROVIDER).lower()
     logger.info("Query [project=%s provider=%s]: %s", project_id, provider, query_text[:80])
 
     rewritten = _rewrite_query(query_text, provider)
-    query_embedding = embed_query(rewritten)
+    
+    # 1. Analyze for claims (weather, holidays)
+    claims_data = analyze_query_for_claim(query_text, provider)
 
+    # 2. Retrieve chunks
+    query_embedding = embed_query(rewritten)
     chunks = hybrid_search(
         query=rewritten,
         query_embedding=query_embedding,
@@ -107,6 +112,23 @@ def query(
         final_top_k=final_top_k,
         filters=filters,
     )
+
+    # 3. Inject verified claims data as a virtual chunk if found
+    if claims_data:
+        claims_context = format_claims_context(claims_data)
+        virtual_chunk = {
+            "text": claims_context,
+            "metadata": {
+                "source_file": "Verified External APIs",
+                "page_num": "N/A",
+                "clause_ref": "Weather/Holidays",
+                "doc_type": "general",
+                "section_header": "External Data Verification"
+            },
+            "rrf_score": 1.0,
+            "retrieval_sources": ["Open-Meteo & Nager.Date"]
+        }
+        chunks.insert(0, virtual_chunk)
 
     if not chunks:
         return {
@@ -117,6 +139,7 @@ def query(
             "sources": [],
             "original_query": query_text,
             "rewritten_query": rewritten,
+            "claims_data": None,
         }
 
     llm = get_llm(provider)
@@ -127,6 +150,7 @@ def query(
         "sources": _build_sources(chunks),
         "original_query": query_text,
         "rewritten_query": rewritten,
+        "claims_data": claims_data,
     }
 
 
@@ -137,17 +161,21 @@ def query_stream(
     top_k_each: int = 10,
     final_top_k: int = 3,
     filters: Optional[Dict[str, str]] = None,
-) -> tuple[Generator[str, None, None], List[Dict[str, Any]], str]:
+) -> tuple[Generator[str, None, None], List[Dict[str, Any]], str, Optional[Dict[str, Any]]]:
     """
     Streaming variant.
-    Returns (token_generator, sources_list, rewritten_query).
+    Returns (token_generator, sources_list, rewritten_query, claims_data).
     """
     provider = (llm_provider or config.LLM_PROVIDER).lower()
     logger.info("Stream query [project=%s]: %s", project_id, query_text[:80])
 
     rewritten = _rewrite_query(query_text, provider)
-    query_embedding = embed_query(rewritten)
+    
+    # 1. Analyze for claims
+    claims_data = analyze_query_for_claim(query_text, provider)
 
+    # 2. Retrieve chunks
+    query_embedding = embed_query(rewritten)
     chunks = hybrid_search(
         query=rewritten,
         query_embedding=query_embedding,
@@ -157,6 +185,23 @@ def query_stream(
         filters=filters,
     )
 
+    # 3. Inject verified claims data as a virtual chunk
+    if claims_data:
+        claims_context = format_claims_context(claims_data)
+        virtual_chunk = {
+            "text": claims_context,
+            "metadata": {
+                "source_file": "Verified External APIs",
+                "page_num": "N/A",
+                "clause_ref": "Weather/Holidays",
+                "doc_type": "general",
+                "section_header": "External Data Verification"
+            },
+            "rrf_score": 1.0,
+            "retrieval_sources": ["Open-Meteo & Nager.Date"]
+        }
+        chunks.insert(0, virtual_chunk)
+
     sources = _build_sources(chunks)
 
     if not chunks:
@@ -165,7 +210,7 @@ def query_stream(
                 "No relevant documents found for your query. "
                 "Please ensure documents have been ingested for this project."
             )
-        return _empty(), [], rewritten
+        return _empty(), [], rewritten, None
 
     llm = get_llm(provider)
-    return llm.generate_stream(rewritten, chunks), sources, rewritten
+    return llm.generate_stream(rewritten, chunks), sources, rewritten, claims_data

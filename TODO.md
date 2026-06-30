@@ -15,6 +15,13 @@
 - [ ] Scaffold Neo4j/RedisGraph push and query support (production option)
 - [ ] Add automated benchmarks: precision@k, latency, token-cost comparison
 
+## Market-Driven Enhancements (Ideation)
+
+- [x] Prototype Automated Contract Risk & Clause Flagging against standard FIDIC baselines.
+- [x] Integrate Open-Meteo & Nager.Date APIs into query pipeline for Claims & Delay Analysis.
+- [ ] Scaffold Semantic Diffing for multi-version document reconciliation.
+- [ ] Extract entities (Material, Location, Date) from unstructured site reports to link with contract graphs.
+
 ## Notes
 - Use `pipx` or `uv` to install graphifyy safely (recommended).
 - Graph extraction of PDFs/docs requires an LLM backend unless using local Ollama.
